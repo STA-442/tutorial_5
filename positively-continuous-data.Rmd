@@ -1,0 +1,728 @@
+---
+title: "Tutorial 5"
+author: "Josh Murray"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+This tutorial makes use of a few of packages we have not seen yet:
+
+- [`gt`](https://gt.rstudio.com/) - for making tables
+- [`gtsummary]`(https://www.danieldsjoberg.com/gtsummary/) - for making summary tables
+- [`dkahle/invgamma`](https://cran.r-project.org/web/packages/invgamma/README.html) For sampling from an inverse gamma distribution
+- [`cowplot`](https://github.com/wilkelab/cowplot) - for combining ggplots in a grid
+
+More information on each package can be found by clicking on the package name above. To install, you can run the following code
+
+```{r, eval=F}
+install.packages('gt')
+install.packages('gtsummary')
+devtools::install_github("dkahle/invgamma")
+```
+
+
+## Modeling positive continuous data
+
+
+So far in class, we have looked at modeling:
+
+- Normally distributed data
+- Binomial and proportion data
+- Poisson distributed data
+- Overdispersed poisson
+- Zero inflated count data
+
+In this tutorial we will look at one last case study for outcomes that we commonly see in practice: *positive continuously distributed data*
+
+Outcomes that take positive and continuous values often measure the amount of some physical
+quantity that is always present. Gamma and inverse Gaussian distributions are the most common glms for this type of data. Careful consideration of the link function and transformations of the covariates allow for flexibility in modeling the relationships between the response and explanatory variables.
+
+Examples of variables that usually meet this criteria:
+
+- Household Income 
+- Wait times to see a doctor in the emergency room
+- Time to failure of machine parts
+- Claims data in insurance
+- Seen in a lot of physics applications
+
+
+### Example 1
+
+A series of studies sampled the forest biomass in Eurasia. In this example, we will look at a sample of that data for small-leaved lime trees (Tilia cordata).
+
+![](img/Tilia-cordata.jpg)
+
+For this example we will use the lime data set found data folder
+
+```{r}
+library(tidyverse)
+library(janitor)
+# for making tables in R
+library(gt)
+
+lime <- readr::read_csv('data/lime.csv') %>% 
+  janitor::clean_names() # put names in lower case
+
+lime  %>%
+  head() %>% 
+  gt() %>%
+  tab_header(
+    title = "Data from small-leaved lime trees grown in Russia",
+    subtitle = "A data frame containing 385 observations with the following 4 variables"
+  )
+
+
+```
+
+This data set has 4 variables:
+
+- `foliage`: the foliage biomass in kilograms (oven dried matter)
+- `dbh`: the tree diameter, at breast height, in cm
+- `age`: the age of the tree, in years
+- `origin`: the origin of the tree; one of `Coppice`, `Natural`, `Planted`
+
+
+We want to model the foliage biomass $y$. The foliage grows on the outer canopy, which could be approximated as a spherical shape. A possible model is that the mean foliage biomass $\mu$ (variable `Foliage`) may be related to the surface area of the canopy. The canopy diameter may be proportional to the diameter of the tree trunk (variable DBH).
+
+This suggests a model where  $\mu$ is proportional to the surface area:
+
+$$\text{foliage}_i \propto  4\pi(\text{dbh}_i/2)^2 = \pi\times\text{dbh}_{i}^2$$
+
+### Descriptive statistics
+
+It's good practice to make summary statistics and plot your data, which we do here.
+
+
+```{r}
+
+p1 <- lime %>% 
+  ggplot(aes(foliage)) +
+  geom_histogram(aes(y=..density..), alpha=0.5, 
+                position="identity")+
+  geom_density(alpha=.2)+
+  labs(title = "Distribution of Foliage Biomass (in kg)",
+       x = "Foliage biomass (in kg)")
+
+
+p2 <- lime %>% 
+  ggplot(aes(dbh, foliage, color = origin)) +
+  geom_point() +
+  labs(title = "Foliage by DBH",
+       subtitle = "Color by tree origin",
+       x = "DBH (in cm)",
+       y = "Foliage biomass (in kg)") +
+  theme_bw()
+
+p3 <- lime %>% 
+  ggplot(aes(log(dbh), log(foliage), color = origin)) +
+  geom_point() +
+  labs(title = "Foliage by DBH",
+       subtitle = "Color by tree origin",
+       x = "log(DBH (in cm))",
+       y = "log(Foliage biomass (in kg))") +
+  theme_bw()
+
+p4 <- lime %>% 
+  ggplot(aes(age, foliage, color = origin)) +
+  geom_point() +
+  labs(title = "Foliage by Tree Age",
+       subtitle = "Color by tree origin",
+       x = "Age in years",
+       y = "Foliage biomass (in kg)") +
+  theme_bw()
+
+p5 <- lime %>% 
+  ggplot(aes(origin, foliage)) +
+  geom_boxplot() +
+  labs(title = "Foliage by Tree Origin",
+       x = "Tree Origin",
+       y = "Foliage biomass (in kg)") +
+  theme_bw()
+
+
+p1
+
+cowplot::plot_grid(p2, p3, p4, p5, nrow=2)
+
+
+
+```
+
+
+From the plots we see that the response is always positive. We also notice that the variance in
+foliage biomass increases as the mean increases, and we can see a relationship exists
+between foliage biomass and dbh, and between foliage biomass and age. The
+effect of origin is harder to see.
+
+For completeness, we calculate a few descriptive statistics.
+
+```{r}
+library(gtsummary)
+
+# summarize the data 
+lime %>% 
+  tbl_summary()
+
+```
+
+
+## The Gamma distribution
+
+A common distribution for modeling positively skewed data is the gamma distribution whose density function is given by:
+
+$$P(y: \alpha, \beta) = \frac{y^{(\alpha - 1)}exp(-y/\beta)}{\Gamma(\alpha)\beta^\alpha}, \text{for } y>0, \alpha > 0 \text{(the shape parameter)}, \beta > 0 \text{ (the scale parameter)}$$
+
+We call $\Gamma()$ the gamma function. For example, if $n$ is some a positive integer, then $\Gamma(n) = (n-1)!$.
+
+The expectation of the gamma distribution is:
+
+$$E[y] = \alpha\beta$$
+
+The variance is given by:
+
+$$Var[y] = \alpha\beta^2$$
+
+Note that for larger expectations, we can increasingly large variances. Below we see some examples of gamma distributions.
+
+```{r}
+x <- runif(1000, 0, 5)
+p1 <- ggplot(data=data.frame(x),aes(x=x))+
+  stat_function(fun=dgamma, args=list(shape=0.5, rate=1))+
+  ggtitle("gamma(.5,1)")
+p2 <- ggplot(data=data.frame(x),aes(x=x))+
+  stat_function(fun=dgamma, args=list(shape=1, rate=.5))+
+  ggtitle("gamma(1,.5)")
+p3 <- ggplot(data=data.frame(x),aes(x=x))+
+  stat_function(fun=dgamma, args=list(shape=5, rate=2))+
+  ggtitle("gamma(5,2)")
+p4 <- ggplot(data=data.frame(x),aes(x=x))+
+  stat_function(fun=dgamma, args=list(shape=2, rate=5))+
+  ggtitle("gamma(2,5)")
+
+cowplot::plot_grid(p1, p2, p3, p4)
+
+```
+
+
+Our data can be split into smaller groups, and the mean and variance of each group calculated. Below we see that the variance increases as the mean increases:
+
+```{r}
+mean_var_sum <- lime %>% 
+  mutate(age_group = cut(age, breaks = 4)) %>% 
+  group_by(origin, age_group) %>% 
+  summarize(var_foliage = var(foliage),
+          mean_foliage = mean(foliage))
+
+mean_var_sum %>% 
+  ggplot(aes(log(mean_foliage), log(var_foliage))) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  labs(title = "Relationship between group means and group variances",
+       x = 'log(group mean)', y = 'log(group var)')
+```
+
+
+We can also fit a linear regression to this data
+
+
+```{r}
+lm_model <- lm(log(var_foliage) ~ log(mean_foliage), data = mean_var_sum)
+
+broom::tidy(lm_model) %>% 
+  gt()
+
+```
+
+The slope of the line is a little less than 2, so approximately::
+
+$$log(\text{group variance}) \propto 2\times log(\text{group mean})$$
+
+Re-arranging shows the group variance is approximately proportional to
+square of the group mean. That is,  $Var(\mu) \approx \mu^2$ which corresponds
+to a gamma distribution
+
+
+### The link functions
+
+The canonical link function for the gamma distribution is the inverse link function $\eta=\frac{1}{\mu}$. For the gamma  distribution, R
+allows the use of the link functions "log", "identity" and "inverse".
+
+
+
+In practice, we often use the logarithmic link function  because it avoids the  constraint on the linear predictor ($\mu > 0$). The log-link often also leads to a useful interpretation
+where the impact of the explanatory variables is multiplicative (similar to when we log transform our output in a linear regression).
+
+
+Let's try fitting our data using the inverse and log links
+
+
+```{r}
+# the log link
+lime_log_link <- glm( foliage ~ origin*log(dbh), family=Gamma(link="log"), data=lime)
+
+summary(lime_log_link)
+```
+
+
+```{r, error=T}
+lime_inv_link <- glm( foliage ~ origin*log(dbh), family=Gamma(link="inverse"), data=lime)
+
+```
+
+The log link model converged, however, the inverse link model did not: R cannot find
+suitable starting points. The inverse link function does not restrict $\mu$ to be positive
+
+We can try to get around this issue by finding a more suitable starting point. We can pass starting points to the `glm()` function on the scale of the data (using the argument `mustart`) or on the scale of the linear predictor (using the argument `etastart`). 
+
+Below we provide the fitted values from lime_log_link as a starting point:
+
+
+```{r, error=T}
+lime_log_link_fitted <- fitted(lime_log_link)
+lime_inv_link <- glm( foliage ~ origin*log(dbh), 
+                      family=Gamma(link="inverse"), 
+                      data=lime,
+                      mustart= lime_log_link_fitted)
+
+```
+
+The model still can't converge. We can try another link function (the identity):
+
+```{r, error=T}
+lime_indentity_link <- glm( foliage ~ origin*log(dbh), 
+                      family=Gamma(link="identity"), 
+                      data=lime)
+
+# Try with starting values
+lime_indentity_link <- glm( foliage ~ origin*log(dbh), 
+                      family=Gamma(link="identity"), 
+                      data=lime,
+                      mustart= lime_log_link_fitted)
+
+```
+
+The glm with the identity link function still does not converge. The inverse-link and identity-link models don't seem appropriate in this case.
+
+Below we look at the residuals from this model:
+
+```{r}
+library(statmod) # for qresid
+
+lime_augmented <- lime %>% 
+  mutate(lime_log_link_fitted = fitted(lime_log_link), # obtained above
+         standardized_resid = rstandard(lime_log_link),
+         linear_predictor = lime_log_link$linear.predictor,  # i.e. eta
+         working_res = resid(lime_log_link, type="working"),
+         qq_norm = qresid(lime_log_link),
+         cooks_distance = cooks.distance(lime_log_link)) 
+
+d1 <- lime_augmented %>% 
+  ggplot(aes(log(lime_log_link_fitted),standardized_resid)) + 
+  geom_point() +
+  labs(x = "log(fitted values)",
+        y = "Standardized residuals") +
+  theme_bw()
+
+d2 <- lime_augmented %>% 
+  ggplot(aes(linear_predictor ,linear_predictor + working_res)) + 
+  geom_point() +
+  labs(x = "Linear Predictor",
+        y = "Working Residuals")+
+  theme_bw()
+
+d3 <- lime_augmented %>% 
+  ggplot(aes(sample = qq_norm)) + 
+  stat_qq() +
+  stat_qq_line() +
+  labs(x = "Theoretical Quantiles",
+        y = "Sample Quantiles")+
+  theme_bw()
+
+d4 <- lime_augmented %>% 
+  ggplot( aes(seq_along(cooks_distance), cooks_distance)) +
+  geom_col() +
+  labs(x = "Index",
+       y = "Cooks Distance")
+
+cowplot::plot_grid(d1, d2, d3, d4, nrow=2)
+```
+
+Note the use of `type = "working`. These residuals are generated as
+
+$$r_i = \frac{y_i - \hat{f}(x_i)}{\hat{f}(x_i)}$$
+
+For example
+
+```{r}
+
+res_working1 <- residuals(lime_log_link, type="working")
+res_working2 <- (lime$foliage - fitted(lime_log_link)) / fitted(lime_log_link)
+all.equal(res_working1, res_working2)
+
+```
+
+
+Influential observations are outliers with high leverage. The measures of influence
+used for linear regression models such as Cook’s distance can be approximated for GLMs by using results from the final iteration of the algorithm used to fit the model in R.
+
+The model diagnostics look good in this case. 
+
+
+
+
+### Relationships with the gamma distribution
+
+By varying our link function and covariate transformations, we can actually model many different relationship forms. Below we look at the following relationships using the log and inverse link functions.
+
+For the `log` link function, we look at the following relationships
+
+1. $log(\mu) = 1 + x$
+2. $log(\mu) = 1 - x$
+3. $log(\mu) = 1 + x + 1/x$
+4. $log(\mu) = 1 - x - 1/x$
+5. $log(\mu) = 1 + 0.02*x - 1/x$
+6. $log(\mu) = 1 - 0.02*x + 1/x$
+
+
+
+```{r}
+gamma_log_link <- Gamma(link = "log")
+x <- runif(1000, 0.5, 3)
+
+# relationship 1
+eta1 <- 1 -x
+mu1 <- gamma_log_link$linkinv(eta1)
+# relationship 2
+eta2 <- 1 -x
+mu2 <- gamma_log_link$linkinv(eta2)
+# relationship 3
+eta3 <- 1 + x + (1/x)
+mu3 <- gamma_log_link$linkinv(eta3)
+# relationship 4
+eta4 <- 1 - x - (1/x)
+mu4 <- gamma_log_link$linkinv(eta4)
+# relationship 5
+eta5 <- 1 + 0.02*x - 1/x
+mu5 <- gamma_log_link$linkinv(eta5)
+# relationship 6
+eta6 <- 1 - 0.02*x + 1/x
+mu6 <- gamma_log_link$linkinv(eta6)
+
+df <- tibble(x = x, mu1 = mu1, mu2 = mu2, mu3 = mu3,
+             mu4 = mu4, mu5 = mu5, mu6 = mu6)
+
+p1 <- df %>% 
+  ggplot(aes(x, mu1, color = "log(mu) = 1 + x")) +
+  geom_point() +
+  labs(color = "link relationship")
+p2 <- df %>% 
+  ggplot(aes(x, mu2, color = "log(mu) = 1 - x")) +
+  geom_point()+
+  labs(color = "link relationship")
+p3 <- df %>% 
+  ggplot(aes(x, mu3, color = "log(mu) = 1 + x + 1/x")) +
+  geom_point()+
+  labs(color = "link relationship")
+p4 <- df %>% 
+  ggplot(aes(x, mu4, color = "log(mu) = 1 - x - 1/x")) +
+  geom_point()+
+  labs(color = "link relationship")
+p5 <- df %>% 
+  ggplot(aes(x, mu5, color = "log(mu) = 1 + 0.02*x - 1/x")) +
+  geom_point()+
+  labs(color = "link relationship")
+
+p6 <- df %>% 
+  ggplot(aes(x, mu6, color = "log(mu) = 1 - 0.02*x + 1/x")) +
+  geom_point()+
+  labs(color = "link relationship")
+
+cowplot::plot_grid(p1, p2, p3, 
+                    p4, p5, p6, nrow = 3)
+
+```
+
+
+For the `inverse` link function, we look at the following relationships
+
+1. $1/\mu = 1 + x$
+2. $1/\mu  = 1 + 1/x$
+3. $1/\mu  = -2 + x + 4*x$
+4. $1/\mu  = 1 + x + x^2$
+
+```{r}
+gamma_inv_link <- Gamma(link = "inverse")
+x <- runif(1000, 0.5, 3)
+
+# relationship 1
+eta1 <- 1 +x
+mu1 <- gamma_inv_link$linkinv(eta1)
+# relationship 2
+eta2 <- 1 + 1/x
+mu2 <- gamma_inv_link$linkinv(eta2)
+# relationship 3
+eta3 <- -2 + x + 4*x
+mu3 <- gamma_inv_link$linkinv(eta3)
+# relationship 4
+eta4 <- 1 + x + x^2
+mu4 <- gamma_inv_link$linkinv(eta4)
+
+df <- tibble(x = x, mu1 = mu1, mu2 = mu2, mu3 = mu3,
+             mu4 = mu4)
+
+p1 <- df %>% 
+  ggplot(aes(x, mu1, color = "1/mu = 1 + x")) +
+  geom_point()+
+  labs(color = "link relationship")
+p2 <- df %>% 
+  ggplot(aes(x, mu2, color = "1/mu = 1 + 1/x")) +
+  geom_point()+
+  labs(color = "link relationship")
+p3 <- df %>% 
+  ggplot(aes(x, mu3, color = "1/mu = -2 + x + 4*x")) +
+  geom_point()+
+  labs(color = "link relationship")
+p4 <- df %>% 
+  ggplot(aes(x, mu4, color = "1/mu = 1 + x + x^2")) +
+  geom_point()+
+  labs(color = "link relationship")
+
+cowplot::plot_grid(p1, p2, p3, 
+                    p4,  nrow = 2)
+
+```
+
+
+### Estimating the dispersion parameter
+
+The Gamma GLM has an estimated dispersion parameter $\phi$ and it cannot be calculated with a closed form equation. Instead we use  Pearson and deviance estimates. 
+
+the Pearson estimator is given by:
+
+$$\hat{\phi} = \frac{1}{n-p^{\prime}}\sum_{i=1}^{n}\frac{w_i(y_i - \hat{\mu_i})^2}{\hat{\mu_i}^2}$$
+
+this is recommended over the mean deviance estimator given by:
+
+$$\bar{\phi} = \frac{D(y,\hat{\mu})}{n-p^{\prime}}$$
+
+Below we show how to calculate these in our example so far
+
+```{r}
+phi_mean_deviance <- deviance(lime_log_link)/df.residual(lime_log_link) # Mn dev estimate
+phi_pearson <- summary( lime_log_link )$dispersion # Pearson estimate
+c( "Mean Deviance"=phi_mean_deviance, "Pearson"=phi_pearson)
+
+
+```
+
+Notice that the pearson estimate is the default from our `glm` model object (i.e. `summary( lime_log_link )$dispersion`).
+
+We can extract an analysis of deviance table using the anova function, which uses the pearson estimate by default
+
+```{r}
+round(anova(lime_log_link, test="F"), 3)
+
+
+```
+
+
+We could use the mean deviance estimator if we wish
+
+```{r}
+round(anova(lime_log_link, test="F", dispersion=phi_mean_deviance), 3)
+
+
+```
+
+The conclusions are almost identical. 
+
+
+Looking at our coefficients
+
+```{r}
+summary(lime_log_link)
+
+
+```
+
+We see that there is little difference between natural and coppice trees (the reference category). We see that Planted trees have exp(0.3245) = 1.38 times the foliage as coppice trees. We also expected our dbh estimate to be 2, and our estimate is 1.84. We could perform a formal test against that hypothesis. 
+
+## Inverse Gaussian
+
+Another popular distribution for modeling positive continuous data is the inverse gaussian distribution. The inverse Gaussian distribution is used when the responses are even more skewed than suggested by the gamma distribution. The density function is given by
+
+$$P(y; \mu, \phi) = (2\pi y^3\phi)^{-1/2}exp\Big(-\frac{1}{2\phi}\frac{(y-\mu)^2}{y\mu^2}\Big)$$
+where $y > 0$, for $\mu > 0$ and $\phi$ is called the dispersion parameter. The variance
+function is given by $Var(\mu) = \mu^3$.
+
+Similar to the gamma distribution, the canonical link function is $\eta=1/\mu^2$ although we often use other links in practice so that $\mu >0$.
+
+
+
+Below are a few example inverse gaussian distributions.
+
+```{r}
+x <- runif(1000, 0, 5)
+p1 <- ggplot(data=data.frame(x),aes(x=x))+
+  stat_function(fun=invgamma::dinvgamma, args=list(shape=0.5, rate=1))+
+  ggtitle("inv_gamma(.5,1)")
+p2 <- ggplot(data=data.frame(x),aes(x=x))+
+  stat_function(fun=invgamma::dinvgamma, args=list(shape=1, rate=.5))+
+  ggtitle("inv_gamma(1,.5)")
+p3 <- ggplot(data=data.frame(x),aes(x=x))+
+  stat_function(fun=invgamma::dinvgamma, args=list(shape=5, rate=2))+
+  ggtitle("inv_gamma(5,2)")
+p4 <- ggplot(data=data.frame(x),aes(x=x))+
+  stat_function(fun=invgamma::dinvgamma, args=list(shape=2, rate=5))+
+  ggtitle("inv_gamma(2,5)")
+
+cowplot::plot_grid(p1, p2, p3, p4, nrow=2)
+  
+```
+
+
+The inverse Gaussian distribution has an interpretation connected to Brownian motion. [Brownian motion](https://en.wikipedia.org/wiki/Brownian_motion) is the name given to the random movement of particles over time.
+
+For a particle moving with Brownian motion with positive drift (the tendency to move from the current location), the inverse Gaussian distribution describes the distribution of the time taken for the particle to reach some point that is a fixed positive distance $\delta$ away. 
+
+The normal distribution, also known as the Gaussian distribution, describes the distribution of distance from the origin at fixed time. The inverse Gaussian distribution gets its name from this relationship to the normal distribution.
+
+
+### Inverse Gamma with our lime data
+
+
+```{r}
+lime_inv_gaus <- glm( foliage ~ origin * log(dbh), 
+                      family=inverse.gaussian(link="log"), 
+                      data=lime)
+summary(lime_inv_gaus)
+```
+
+
+We can look at the AIC values to see that the Gamma distribution is prefered to the Inverse Gaussian in this case.
+
+```{r}
+
+c( "Gamma:"=AIC(lime_log_link), "inv. Gauss.:"=AIC(lime_inv_gaus) )
+```
+
+## Example 2: permeability of sheet metal
+
+
+The permeability of sheets of building materials was measured on three different machines for 3 different sheets over nine days,giving a total of 81 sheets. 
+
+The data give the average permeability (in seconds) of eight sheets of building materials (equal thickness), using random samples of 81 sheets in three machines over nine days, with three measurements for each machine–day combination.
+
+
+```{r}
+perm <- readr::read_csv('data/perm.csv')
+
+perm  %>%
+  head() %>% 
+  gt() %>%
+  tab_header(
+    title = "The permeability of building materials",
+    subtitle = "3 sheets on 3 machines over 9 days (N = 81)"
+  )
+
+
+```
+
+The data contains the following variables:
+
+- `day`: the day; a factor with levels 1 up to 9
+- `pach`: the machine used for measurement; a factor with levels A, B or C
+- `perm`: the permeability in seconds: a numeric vector
+
+
+Let's begin by plotting the data
+
+
+```{r}
+
+p1 <- perm %>% 
+  ggplot(aes(perm)) +
+  geom_histogram(aes(y=..density..), alpha=0.5, 
+                position="identity")+
+  geom_density(alpha=.2)+
+  labs(title = "Distribution of the permeability in seconds",
+       x = "Permeability in seconds")
+
+p2 <- perm %>% 
+  ggplot(aes(factor(day), perm)) +
+  geom_boxplot()+
+  labs(title = "Permeability in seconds by day",
+       x = "Day of week", 
+       y = "Permeability in seconds")
+
+p3 <- perm %>% 
+  ggplot(aes(factor(mach), perm)) +
+  geom_boxplot()+
+  labs(title = "Permeability in seconds by machine",
+       x = "machine", 
+       y = "Permeability in seconds")
+p1
+cowplot::plot_grid(p2, p3, nrow=2)
+
+```
+
+From our plots above, we see that the variance increases with the mean. 
+
+Further, the inverse Gaussian model may be appropriate since particles move at random according to Brownian motion through the building material assuming uniform material, drifting across the sheet.
+
+We will use the log link function so that our coefficients have a multiplicative effect on the outcome.
+
+
+
+
+```{r}
+perm_inv_gauss <- glm( perm ~ mach * day, data=perm, 
+                       family=inverse.gaussian(link="log") )
+
+summary(perm_inv_gauss )
+
+```
+
+We conduct an F test to assess our covariates:
+
+```{r}
+round( anova( perm_inv_gauss, test="F"), 3)
+
+
+```
+
+First, the interaction is not needed. Further the effect of day doesn't seem to provide any benefit, so we refit with only the machine as a covariate.
+
+
+```{r}
+perm_inv_gauss <- glm( perm ~ mach, data=perm, 
+                       family=inverse.gaussian(link="log") )
+
+summary(perm_inv_gauss )
+
+```
+
+This very simple model, is only modeling the mean value for each of the machines. We verify this below:
+
+```{r}
+perm %>% 
+  mutate(fitted_values = fitted(perm_inv_gauss)) %>% 
+  select(mach, perm, fitted_values) %>% 
+  group_by(mach) %>% 
+  summarize_all(mean)
+
+```
+
+#### Interpretation of the coefficients
+
+The model suggests that compared to machine A, Machine B has exp(-0.6390) = 0.52782 times the permeability. 
+
+Similarly, the permeability measurements on Machine C are, on average,
+exp(−0.1729) = 0.8413 times those for Machine A. The output suggests
+Machine C is very similar to Machine A, but Machine B is different.
+
+
